@@ -1,0 +1,119 @@
+module uart_rx (
+  input  logic       rx_clk,        // 16x baud clock
+  input  logic       rst,
+  input  logic       rx,
+  input  logic       rx_start,
+  input  logic       parity_en,
+  input  logic       parity_type,   // 1 = odd, 0 = even
+  input  logic       stop2,         // 1 = two stop bits
+  input  logic [3:0] length,        
+  output logic [7:0] rx_out,
+  output logic       rx_done,
+  output logic       rx_error
+);
+
+  typedef enum logic [2:0] {
+    IDLE, START_BIT, RECV_BIT, PARITY_CHECK,
+    CHECK_FIRST_STOP, CHECK_SEC_STOP, DONE
+  } state_type;
+
+  state_type  state, next_state;
+  logic [3:0] count;
+  logic [3:0] bit_count;
+  logic [7:0] rxdata;
+  logic       err;
+
+
+  logic [7:0] data_aligned;
+  logic       parity_calc;
+  assign data_aligned = rxdata >> (8 - length);
+  assign parity_calc  = parity_type ? ~^data_aligned : ^data_aligned;
+
+  always_ff @(posedge rx_clk) begin
+    if (rst) state <= IDLE;
+    else     state <= next_state;
+  end
+
+  always_comb begin
+    next_state = state;                       // default: no latch
+    case (state)
+      IDLE: if (rx_start && !rx) next_state = START_BIT;
+
+      START_BIT: begin
+        if (count == 7 && rx)  next_state = IDLE;       // false start
+        else if (count == 15)  next_state = RECV_BIT;
+      end
+
+      RECV_BIT: begin
+        if (count == 15 && bit_count == length - 1)
+          next_state = parity_en ? PARITY_CHECK : CHECK_FIRST_STOP;
+      end
+
+      PARITY_CHECK:     if (count == 15) next_state = CHECK_FIRST_STOP;
+
+      CHECK_FIRST_STOP: if (count == 15) next_state = stop2 ? CHECK_SEC_STOP : DONE;
+
+      CHECK_SEC_STOP:   if (count == 15) next_state = DONE;
+
+      DONE:             next_state = IDLE;
+
+      default:          next_state = IDLE;
+    endcase
+  end
+
+  always_ff @(posedge rx_clk) begin
+    if (rst) begin
+      count     <= 0;
+      bit_count <= 0;
+      rxdata    <= 0;
+      rx_out    <= 0;
+      rx_done   <= 0;
+      rx_error  <= 0;
+      err       <= 0;
+    end else begin
+      rx_done <= 0;                            // pulse
+
+      case (state)
+        IDLE: begin
+          count     <= 0;
+          bit_count <= 0;
+          err       <= 0;
+        end
+
+        START_BIT: begin
+          count <= (count == 15) ? 0 : count + 1;
+        end
+
+        RECV_BIT: begin
+          if (count == 7) rxdata <= {rx, rxdata[7:1]};   // sample mid-bit
+          if (count == 15) begin
+            count     <= 0;
+            bit_count <= bit_count + 1;
+          end else
+            count <= count + 1;
+        end
+
+        PARITY_CHECK: begin
+          if (count == 7 && rx != parity_calc) err <= 1;
+          count <= (count == 15) ? 0 : count + 1;
+        end
+
+        CHECK_FIRST_STOP, CHECK_SEC_STOP: begin
+          if (count == 7 && rx != 1'b1) err <= 1;
+          count <= (count == 15) ? 0 : count + 1;
+        end
+
+        DONE: begin
+          rx_out    <= data_aligned;
+          rx_done   <= 1'b1;
+          rx_error  <= err;
+          count     <= 0;
+          bit_count <= 0;
+        end
+
+        default: ;
+      endcase
+    end
+  end
+
+endmodule
